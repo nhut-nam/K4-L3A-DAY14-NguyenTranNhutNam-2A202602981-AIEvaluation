@@ -25,6 +25,7 @@ The reranking helper is an optional bonus exercise and may remain unimplemented.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -378,8 +379,7 @@ class LLMJudge:
     """
 
     def __init__(self, judge_llm_fn: Callable[[str], str]) -> None:
-        # TODO: store judge_llm_fn
-        pass
+        self.judge_llm_fn = judge_llm_fn
 
     def score_response(
         self,
@@ -411,8 +411,33 @@ class LLMJudge:
                 "reasoning": str,               # raw LLM explanation
             }
         """
-        # TODO
-        raise NotImplementedError("Implement score_response")
+        rubric_text = "\n".join(
+            f"- {criterion}: {description}"
+            for criterion, description in rubric.items()
+        )
+        prompt = (
+            "Score the following AI answer. Return a JSON object mapping each "
+            "criterion to a score from 0 to 1, followed by any brief reasoning.\n\n"
+            f"Question: {question}\n"
+            f"Answer: {answer}\n"
+            f"Rubric:\n{rubric_text}"
+        )
+        raw = self.judge_llm_fn(prompt)
+        scores: dict[str, float] = {}
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                candidate = parsed.get("scores", parsed)
+                if isinstance(candidate, dict):
+                    for criterion in rubric:
+                        value = candidate.get(criterion)
+                        if isinstance(value, (int, float)):
+                            scores[criterion] = max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            pass
+        for criterion in rubric:
+            scores.setdefault(criterion, 0.5)
+        return {"scores": scores, "reasoning": raw}
 
     def detect_bias(self, scores_batch: list[dict[str, Any]]) -> dict[str, Any]:
         """
@@ -433,8 +458,33 @@ class LLMJudge:
                 "severity_bias":   bool,
             }
         """
-        # TODO
-        raise NotImplementedError("Implement detect_bias")
+        values = [
+            float(value)
+            for item in scores_batch
+            for value in item.get("scores", {}).values()
+            if isinstance(value, (int, float))
+        ]
+        average = sum(values) / len(values) if values else 0.0
+
+        positional_bias = False
+        if len(scores_batch) >= 2:
+            def item_average(item: dict[str, Any]) -> float:
+                item_values = [
+                    float(value)
+                    for value in item.get("scores", {}).values()
+                    if isinstance(value, (int, float))
+                ]
+                return sum(item_values) / len(item_values) if item_values else 0.0
+
+            first_score = item_average(scores_batch[0])
+            remaining = [item_average(item) for item in scores_batch[1:]]
+            positional_bias = first_score > (sum(remaining) / len(remaining)) + 0.1
+
+        return {
+            "positional_bias": positional_bias,
+            "leniency_bias": bool(values and average > 0.8),
+            "severity_bias": bool(values and average < 0.3),
+        }
 
 
 # ---------------------------------------------------------------------------
